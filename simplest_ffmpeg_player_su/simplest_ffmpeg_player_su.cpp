@@ -1,6 +1,12 @@
 /**
- * 最简单的基于FFmpeg的视频播放器2(SDL升级版)
- * Simplest FFmpeg Player 2(SDL Update)
+ * 最简单的基于FFmpeg的视频旋转Demo
+ * Simplest FFmpeg Rotater
+ *
+ *update by izumihoshi
+ *
+ *在雷老师的演示程序的基础上，添加了用libavfilter实现的视频旋转，
+ *并且在命令行窗口输出每一帧旋转的时间。
+ *
  *
  * 雷霄骅 Lei Xiaohua
  * leixiaohua1020@126.com
@@ -37,6 +43,7 @@
  */
 
 #include <stdio.h>
+#include <windows.h>
 
 #define __STDC_CONSTANT_MACROS
 
@@ -47,7 +54,10 @@ extern "C"
 #include "libavcodec/avcodec.h"
 #include "libavformat/avformat.h"
 #include "libswscale/swscale.h"
-#include "libavutil/imgutils.h"
+#include "libavfilter/avfiltergraph.h"
+#include "libavfilter/buffersink.h"
+#include "libavfilter/buffersrc.h"
+#include "libavutil/opt.h"
 #include "SDL2/SDL.h"
 };
 #else
@@ -59,7 +69,6 @@ extern "C"
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
-#include <libavutil/imgutils.h>
 #include <SDL2/SDL.h>
 #ifdef __cplusplus
 };
@@ -104,14 +113,18 @@ int main(int argc, char* argv[])
 	int				i, videoindex;
 	AVCodecContext	*pCodecCtx;
 	AVCodec			*pCodec;
-	AVFrame	*pFrame,*pFrameYUV;
-	unsigned char *out_buffer;
+	AVFrame	*pFrame, *pFrameYUV;
+	AVFrame *filtFrame;
+	uint8_t *out_buffer;
 	AVPacket *packet;
 	int ret, got_picture;
+	int videoWidth, videoHeight;
+	int transpose;
 
+	transpose = 1;	//0为视频镜像，1为顺时针旋转90度，2为顺时针旋转180度，3为逆时针旋转90度
 	//------------SDL----------------
-	int screen_w,screen_h;
-	SDL_Window *screen; 
+	int screen_w, screen_h;
+	SDL_Window *screen;
 	SDL_Renderer* sdlRenderer;
 	SDL_Texture* sdlTexture;
 	SDL_Rect sdlRect;
@@ -121,120 +134,248 @@ int main(int argc, char* argv[])
 	struct SwsContext *img_convert_ctx;
 
 	//char filepath[]="bigbuckbunny_480x272.h265";
-	char filepath[]="Titanic.ts";
+	char filepath[] = "Titanic.ts";
+	//char filepath[] = "Clip_1080_5sec_10mbps_h264.mp4";
 
 	av_register_all();
+	avfilter_register_all();
 	avformat_network_init();
 	pFormatCtx = avformat_alloc_context();
 
-	if(avformat_open_input(&pFormatCtx,filepath,NULL,NULL)!=0){
+	if (avformat_open_input(&pFormatCtx, filepath, NULL, NULL) != 0){
 		printf("Couldn't open input stream.\n");
 		return -1;
 	}
-	if(avformat_find_stream_info(pFormatCtx,NULL)<0){
+	if (avformat_find_stream_info(pFormatCtx, NULL) < 0){
 		printf("Couldn't find stream information.\n");
 		return -1;
 	}
-	videoindex=-1;
-	for(i=0; i<pFormatCtx->nb_streams; i++) 
-		if(pFormatCtx->streams[i]->codec->codec_type==AVMEDIA_TYPE_VIDEO){
-			videoindex=i;
-			break;
-		}
-	if(videoindex==-1){
+	videoindex = -1;
+	for (i = 0; i < pFormatCtx->nb_streams; i++)
+	if (pFormatCtx->streams[i]->codec->codec_type == AVMEDIA_TYPE_VIDEO){
+		videoindex = i;
+		break;
+	}
+	if (videoindex == -1){
 		printf("Didn't find a video stream.\n");
 		return -1;
 	}
-	pCodecCtx=pFormatCtx->streams[videoindex]->codec;
-	pCodec=avcodec_find_decoder(pCodecCtx->codec_id);
-	if(pCodec==NULL){
+	pCodecCtx = pFormatCtx->streams[videoindex]->codec;
+	pCodec = avcodec_find_decoder(pCodecCtx->codec_id);
+	if (pCodec == NULL){
 		printf("Codec not found.\n");
 		return -1;
 	}
-	if(avcodec_open2(pCodecCtx, pCodec,NULL)<0){
+	if (avcodec_open2(pCodecCtx, pCodec, NULL) < 0){
 		printf("Could not open codec.\n");
 		return -1;
 	}
-	pFrame=av_frame_alloc();
-	pFrameYUV=av_frame_alloc();
 
-	out_buffer=(unsigned char *)av_malloc(av_image_get_buffer_size(AV_PIX_FMT_YUV420P,  pCodecCtx->width, pCodecCtx->height,1));
-	av_image_fill_arrays(pFrameYUV->data, pFrameYUV->linesize,out_buffer,
-		AV_PIX_FMT_YUV420P,pCodecCtx->width, pCodecCtx->height,1);
+	if (transpose == 1 || transpose == 3)
+	{
+		videoWidth = pCodecCtx->height;
+		videoHeight = pCodecCtx->width;
+	}
+	else
+	{
+		videoWidth = pCodecCtx->width;
+	 	videoHeight = pCodecCtx->height;
+	}
+	
+	//--------------start filter init-----
+	char args[512];
+	ret = 0;
+	AVFilter *buffersrc = avfilter_get_by_name("buffer");
+	AVFilter *buffersink = avfilter_get_by_name("buffersink");
+	AVFilterInOut *outputs = avfilter_inout_alloc();
+	AVFilterInOut *inputs = avfilter_inout_alloc();
+	AVFilterContext *buffersink_ctx;
+	AVFilterContext *buffersrc_ctx;
+	AVFilterGraph *filter_graph;
+	AVRational time_base = pFormatCtx->streams[videoindex]->time_base;
+	enum AVPixelFormat pix_fmts[] = { PIX_FMT_YUV420P, AV_PIX_FMT_NONE };
+
+	filter_graph = avfilter_graph_alloc();
+	if (!outputs || !inputs || !filter_graph) {
+		ret = AVERROR(ENOMEM);
+		return -2;
+	}
+	sprintf_s(args, sizeof(args),
+		"video_size=%dx%d:pix_fmt=%d:time_base=%d/%d:pixel_aspect=%d/%d",
+		pCodecCtx->width, pCodecCtx->height, pCodecCtx->pix_fmt,
+		time_base.num, time_base.den,
+		pCodecCtx->sample_aspect_ratio.num, pCodecCtx->sample_aspect_ratio.den);
+	ret = avfilter_graph_create_filter(&buffersrc_ctx, buffersrc, "in",
+		args, NULL, filter_graph);
+	if (ret < 0) {
+		av_log(NULL, AV_LOG_ERROR, "Cannot create buffer source\n");
+		return -2;
+	}
+	/* buffer video sink: to terminate the filter chain. */
+	ret = avfilter_graph_create_filter(&buffersink_ctx, buffersink, "out",
+		NULL, NULL, filter_graph);
+	if (ret < 0) {
+		av_log(NULL, AV_LOG_ERROR, "Cannot create buffer sink\n");
+		return -3;
+	}
+
+	ret = av_opt_set_int_list(buffersink_ctx, "pix_fmts", pix_fmts,
+		AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN);
+	if (ret < 0) {
+		av_log(NULL, AV_LOG_ERROR, "Cannot set output pixel format\n");
+		return -4;
+	}
+	outputs->name = av_strdup("in");
+	outputs->filter_ctx = buffersrc_ctx;
+	outputs->pad_idx = 0;
+	outputs->next = NULL;
+
+	/*
+	* The buffer sink input must be connected to the output pad of
+	* the last filter described by filters_descr; since the last
+	* filter output label is not specified, it is set to "out" by
+	* default.
+	*/
+	inputs->name = av_strdup("out");
+	inputs->filter_ctx = buffersink_ctx;
+	inputs->pad_idx = 0;
+	inputs->next = NULL;
+
+	const char* filter_decr;
+	if (transpose == 1)
+	{
+		filter_decr = "transpose = 1";
+	}
+	else if (transpose == 2)
+	{
+		filter_decr = "transpose = 1,transpose = 1";
+	}
+	else if (transpose == 3)
+	{
+		filter_decr = "transpose = 0";
+	}
+	else
+	{
+		filter_decr = "hflip";
+	}
+	if ((ret = avfilter_graph_parse_ptr(filter_graph, filter_decr,
+		&inputs, &outputs, NULL)) < 0)
+		return -5;
+
+	if ((ret = avfilter_graph_config(filter_graph, NULL)) < 0)
+		return -6;
+	//--------end filter init------
+
+
+
+	pFrame = av_frame_alloc();
+	pFrameYUV = av_frame_alloc();
+	filtFrame = av_frame_alloc();
+	out_buffer = (uint8_t *)av_malloc(avpicture_get_size(PIX_FMT_YUV420P, videoWidth, videoHeight));
+	avpicture_fill((AVPicture *)pFrameYUV, out_buffer, PIX_FMT_YUV420P, videoWidth, videoHeight);
 
 	//Output Info-----------------------------
 	printf("---------------- File Information ---------------\n");
-	av_dump_format(pFormatCtx,0,filepath,0);
+	av_dump_format(pFormatCtx, 0, filepath, 0);
 	printf("-------------------------------------------------\n");
-	
-	img_convert_ctx = sws_getContext(pCodecCtx->width, pCodecCtx->height, pCodecCtx->pix_fmt, 
-		pCodecCtx->width, pCodecCtx->height, AV_PIX_FMT_YUV420P, SWS_BICUBIC, NULL, NULL, NULL); 
-	
 
-	if(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER)) {  
-		printf( "Could not initialize SDL - %s\n", SDL_GetError()); 
-		return -1;
-	} 
-	//SDL 2.0 Support for multiple windows
-	screen_w = pCodecCtx->width;
-	screen_h = pCodecCtx->height;
-	screen = SDL_CreateWindow("Simplest ffmpeg player's Window", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
-		screen_w, screen_h,SDL_WINDOW_OPENGL);
+	img_convert_ctx = sws_getContext(videoWidth, videoHeight, pCodecCtx->pix_fmt,
+		videoWidth, videoHeight, PIX_FMT_YUV420P, SWS_BICUBIC, NULL, NULL, NULL);
 
-	if(!screen) {  
-		printf("SDL: could not create window - exiting:%s\n",SDL_GetError());  
+
+	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_TIMER)) {
+		printf("Could not initialize SDL - %s\n", SDL_GetError());
 		return -1;
 	}
-	sdlRenderer = SDL_CreateRenderer(screen, -1, 0);  
+	//SDL 2.0 Support for multiple windows
+	if (pCodecCtx->width >= 900)
+	{
+		screen_w = videoWidth/2;
+		screen_h = videoHeight/2;
+	}
+	else
+	{
+		screen_w = videoWidth;
+		screen_h = videoHeight;
+	}
+	screen = SDL_CreateWindow("Simplest ffmpeg player's Window", SDL_WINDOWPOS_UNDEFINED, 40,
+		screen_w, screen_h, SDL_WINDOW_OPENGL);
+
+	if (!screen) {
+		printf("SDL: could not create window - exiting:%s\n", SDL_GetError());
+		return -1;
+	}
+	sdlRenderer = SDL_CreateRenderer(screen, -1, 0);
 	//IYUV: Y + U + V  (3 planes)
 	//YV12: Y + V + U  (3 planes)
-	sdlTexture = SDL_CreateTexture(sdlRenderer, SDL_PIXELFORMAT_IYUV, SDL_TEXTUREACCESS_STREAMING,pCodecCtx->width,pCodecCtx->height);  
+	sdlTexture = SDL_CreateTexture(sdlRenderer, SDL_PIXELFORMAT_IYUV, SDL_TEXTUREACCESS_STREAMING, videoWidth, videoHeight);
 
-	sdlRect.x=0;
-	sdlRect.y=0;
-	sdlRect.w=screen_w;
-	sdlRect.h=screen_h;
+	sdlRect.x = 0;
+	sdlRect.y = 0;
+	sdlRect.w = screen_w;
+	sdlRect.h = screen_h;
 
-	packet=(AVPacket *)av_malloc(sizeof(AVPacket));
+	packet = (AVPacket *)av_malloc(sizeof(AVPacket));
 
-	video_tid = SDL_CreateThread(sfp_refresh_thread,NULL,NULL);
+	video_tid = SDL_CreateThread(sfp_refresh_thread, NULL, NULL);
 	//------------SDL End------------
 	//Event Loop
-	
+	int startTime = 0;
+	int endTime = 0;
 	for (;;) {
 		//Wait
 		SDL_WaitEvent(&event);
-		if(event.type==SFM_REFRESH_EVENT){
-			while(1){
-				if(av_read_frame(pFormatCtx, packet)<0)
-					thread_exit=1;
+		if (event.type == SFM_REFRESH_EVENT){
+			while (1){
+				if (av_read_frame(pFormatCtx, packet) < 0)
+					thread_exit = 1;
 
-				if(packet->stream_index==videoindex)
+				if (packet->stream_index == videoindex)
 					break;
 			}
 			ret = avcodec_decode_video2(pCodecCtx, pFrame, &got_picture, packet);
-			if(ret < 0){
+			if (ret < 0){
 				printf("Decode Error.\n");
 				return -1;
 			}
-			if(got_picture){
-				sws_scale(img_convert_ctx, (const unsigned char* const*)pFrame->data, pFrame->linesize, 0, pCodecCtx->height, pFrameYUV->data, pFrameYUV->linesize);
+			if (got_picture){
+				/* push the decoded frame into the filtergraph */
+				startTime = GetTickCount();
+				if (av_buffersrc_add_frame_flags(buffersrc_ctx, pFrame, AV_BUFFERSRC_FLAG_KEEP_REF) < 0) {
+					av_log(NULL, AV_LOG_ERROR, "Error while feeding the filtergraph\n");
+					break;
+				}
+
+				/* pull filtered frames from the filtergraph */
+
+				ret = av_buffersink_get_frame(buffersink_ctx, filtFrame);
+				endTime = GetTickCount();
+				printf("flip tine count [%d]\n", (endTime - startTime));
+				//display_frame(filtFrame, buffersink_ctx->inputs[0]->time_base);
+				sws_scale(img_convert_ctx, (const uint8_t* const*)filtFrame->data, filtFrame->linesize, 0, videoHeight, pFrameYUV->data, pFrameYUV->linesize);
 				//SDL---------------------------
-				SDL_UpdateTexture( sdlTexture, NULL, pFrameYUV->data[0], pFrameYUV->linesize[0] );  
-				SDL_RenderClear( sdlRenderer );  
+				SDL_UpdateTexture(sdlTexture, NULL, pFrameYUV->data[0], pFrameYUV->linesize[0]);
+				SDL_RenderClear(sdlRenderer);
 				//SDL_RenderCopy( sdlRenderer, sdlTexture, &sdlRect, &sdlRect );  
-				SDL_RenderCopy( sdlRenderer, sdlTexture, NULL, NULL);  
-				SDL_RenderPresent( sdlRenderer );  
+				SDL_RenderCopy(sdlRenderer, sdlTexture, NULL, NULL);
+				SDL_RenderPresent(sdlRenderer);
+
+				av_frame_unref(filtFrame);
+
+
 				//SDL End-----------------------
 			}
 			av_free_packet(packet);
-		}else if(event.type==SDL_KEYDOWN){
+		}
+		else if (event.type == SDL_KEYDOWN){
 			//Pause
-			if(event.key.keysym.sym==SDLK_SPACE)
-				thread_pause=!thread_pause;
-		}else if(event.type==SDL_QUIT){
-			thread_exit=1;
-		}else if(event.type==SFM_BREAK_EVENT){
+			if (event.key.keysym.sym == SDLK_SPACE)
+				thread_pause = !thread_pause;
+		}
+		else if (event.type == SDL_QUIT){
+			thread_exit = 1;
+		}
+		else if (event.type == SFM_BREAK_EVENT){
 			break;
 		}
 

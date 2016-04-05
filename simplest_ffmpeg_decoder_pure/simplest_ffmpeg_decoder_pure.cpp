@@ -28,6 +28,7 @@
 extern "C"
 {
 #include "libavcodec/avcodec.h"
+#include "libswscale/swscale.h"
 };
 #else
 //Linux...
@@ -36,11 +37,13 @@ extern "C"
 {
 #endif
 #include <libavcodec/avcodec.h>
+#include <libswscale/swscale.h>
 #ifdef __cplusplus
 };
 #endif
 #endif
 
+#define USE_SWSCALE 0
 
 //test different codec
 #define TEST_H264  1
@@ -57,11 +60,12 @@ int main(int argc, char* argv[])
     AVFrame	*pFrame;
 	
 	const int in_buffer_size=4096;
-	unsigned char in_buffer[in_buffer_size + FF_INPUT_BUFFER_PADDING_SIZE]={0};
-	unsigned char *cur_ptr;
+	uint8_t in_buffer[in_buffer_size + FF_INPUT_BUFFER_PADDING_SIZE]={0};
+	uint8_t *cur_ptr;
 	int cur_size;
     AVPacket packet;
 	int ret, got_picture;
+	int y_size;
 
 
 #if TEST_HEVC
@@ -78,7 +82,12 @@ int main(int argc, char* argv[])
 	char filepath_out[]="bigbuckbunny_480x272.yuv";
 	int first_time=1;
 
+#if USE_SWSCALE
+	struct SwsContext *img_convert_ctx;
+	AVFrame	*pFrameYUV;
+	uint8_t *out_buffer;
 
+#endif
 	//av_log_set_level(AV_LOG_DEBUG);
 	
 	avcodec_register_all();
@@ -101,7 +110,7 @@ int main(int argc, char* argv[])
 	}
 
     //if(pCodec->capabilities&CODEC_CAP_TRUNCATED)
-    //    pCodecCtx->flags|= CODEC_FLAG_TRUNCATED; 
+    //    pCodecCtx->flags|= CODEC_FLAG_TRUNCATED; /* we do not send complete frames */
     
     if (avcodec_open2(pCodecCtx, pCodec, NULL) < 0) {
         printf("Could not open codec\n");
@@ -160,21 +169,47 @@ int main(int argc, char* argv[])
 				return ret;
 			}
 			if (got_picture) {
+#if USE_SWSCALE
 				if(first_time){
 					printf("\nCodec Full Name:%s\n",pCodecCtx->codec->long_name);
 					printf("width:%d\nheight:%d\n\n",pCodecCtx->width,pCodecCtx->height);
+					//SwsContext
+					img_convert_ctx = sws_getContext(pCodecCtx->width, pCodecCtx->height, pCodecCtx->pix_fmt, 
+						pCodecCtx->width, pCodecCtx->height, PIX_FMT_YUV420P, SWS_BICUBIC, NULL, NULL, NULL); 
+
+					pFrameYUV=av_frame_alloc();
+					out_buffer=(uint8_t *)av_malloc(avpicture_get_size(PIX_FMT_YUV420P, pCodecCtx->width, pCodecCtx->height));
+					avpicture_fill((AVPicture *)pFrameYUV, out_buffer, PIX_FMT_YUV420P, pCodecCtx->width, pCodecCtx->height);
+
+					y_size=pCodecCtx->width*pCodecCtx->height;
+
 					first_time=0;
 				}
-				//Y, U, V
-				for(int i=0;i<pFrame->height;i++){
-					fwrite(pFrame->data[0]+pFrame->linesize[0]*i,1,pFrame->width,fp_out);
+				sws_scale(img_convert_ctx, (const uint8_t* const*)pFrame->data, pFrame->linesize, 0, pCodecCtx->height, 
+					pFrameYUV->data, pFrameYUV->linesize);
+
+				fwrite(pFrameYUV->data[0],1,y_size,fp_out);     //Y 
+				fwrite(pFrameYUV->data[1],1,y_size/4,fp_out);   //U
+				fwrite(pFrameYUV->data[2],1,y_size/4,fp_out);   //V
+#else
+				int i=0;
+				unsigned char* tempptr=NULL;
+				tempptr=pFrame->data[0];
+				for(i=0;i<pFrame->height;i++){
+					fwrite(tempptr,1,pFrame->width,fp_out);     //Y 
+					tempptr+=pFrame->linesize[0];
 				}
-				for(int i=0;i<pFrame->height/2;i++){
-					fwrite(pFrame->data[1]+pFrame->linesize[1]*i,1,pFrame->width/2,fp_out);
+				tempptr=pFrame->data[1];
+				for(i=0;i<pFrame->height/2;i++){
+					fwrite(tempptr,1,pFrame->width/2,fp_out);   //U
+					tempptr+=pFrame->linesize[1];
 				}
-				for(int i=0;i<pFrame->height/2;i++){
-					fwrite(pFrame->data[2]+pFrame->linesize[2]*i,1,pFrame->width/2,fp_out);
+				tempptr=pFrame->data[2];
+				for(i=0;i<pFrame->height/2;i++){
+					fwrite(tempptr,1,pFrame->width/2,fp_out);   //V
+					tempptr+=pFrame->linesize[2];
 				}
+#endif
 
 				printf("Succeed to decode 1 frame!\n");
 			}
@@ -191,20 +226,36 @@ int main(int argc, char* argv[])
 			printf("Decode Error.\n");
 			return ret;
 		}
-		if (!got_picture){
+		if (!got_picture)
 			break;
-		}else {
-			//Y, U, V
-			for(int i=0;i<pFrame->height;i++){
-				fwrite(pFrame->data[0]+pFrame->linesize[0]*i,1,pFrame->width,fp_out);
-			}
-			for(int i=0;i<pFrame->height/2;i++){
-				fwrite(pFrame->data[1]+pFrame->linesize[1]*i,1,pFrame->width/2,fp_out);
-			}
-			for(int i=0;i<pFrame->height/2;i++){
-				fwrite(pFrame->data[2]+pFrame->linesize[2]*i,1,pFrame->width/2,fp_out);
-			}
+		if (got_picture) {
+			
+#if USE_SWSCALE
+			sws_scale(img_convert_ctx, (const uint8_t* const*)pFrame->data, pFrame->linesize, 0, pCodecCtx->height, 
+				pFrameYUV->data, pFrameYUV->linesize);
 
+			fwrite(pFrameYUV->data[0],1,y_size,fp_out);     //Y
+			fwrite(pFrameYUV->data[1],1,y_size/4,fp_out);   //U
+			fwrite(pFrameYUV->data[2],1,y_size/4,fp_out);   //V
+#else
+			int i=0;
+			unsigned char* tempptr=NULL;
+			tempptr=pFrame->data[0];
+			for(i=0;i<pFrame->height;i++){
+				fwrite(tempptr,1,pFrame->width,fp_out);     //Y 
+				tempptr+=pFrame->linesize[0];
+			}
+			tempptr=pFrame->data[1];
+			for(i=0;i<pFrame->height/2;i++){
+				fwrite(tempptr,1,pFrame->width/2,fp_out);   //U
+				tempptr+=pFrame->linesize[1];
+			}
+			tempptr=pFrame->data[2];
+			for(i=0;i<pFrame->height/2;i++){
+				fwrite(tempptr,1,pFrame->width/2,fp_out);   //V
+				tempptr+=pFrame->linesize[2];
+			}
+#endif
 			printf("Flush Decoder: Succeed to decode 1 frame!\n");
 		}
 	}
@@ -212,6 +263,10 @@ int main(int argc, char* argv[])
     fclose(fp_in);
 	fclose(fp_out);
 
+#if USE_SWSCALE
+	sws_freeContext(img_convert_ctx);
+	av_frame_free(&pFrameYUV);
+#endif
 
 	av_parser_close(pCodecParserCtx);
 

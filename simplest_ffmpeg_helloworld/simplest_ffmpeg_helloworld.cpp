@@ -59,9 +59,7 @@ struct URLProtocol;
  */
 char * urlprotocolinfo(){
 	
-	char *info=(char *)malloc(40000);
-	memset(info,0,40000);
-
+	char info[40000]={0};
 	av_register_all();
 
 	struct URLProtocol *pup = NULL;
@@ -86,8 +84,7 @@ char * urlprotocolinfo(){
  */
 char * avformatinfo(){
 
-	char *info=(char *)malloc(40000);
-	memset(info,0,40000);
+	char info[40000] = { 0 };
 
 	av_register_all();
 
@@ -111,8 +108,7 @@ char * avformatinfo(){
  */
 char * avcodecinfo()
 {
-	char *info=(char *)malloc(40000);
-	memset(info,0,40000);
+	char info[40000] = { 0 };
 
 	av_register_all();
 
@@ -149,15 +145,12 @@ char * avcodecinfo()
  */
 char * avfilterinfo()
 {
-	char *info=(char *)malloc(40000);
-	memset(info,0,40000);
-
-	avfilter_register_all();
-
+	char info[40000] = { 0 };
+	av_register_all();
 	AVFilter *f_temp = (AVFilter *)avfilter_next(NULL);
 	
 	while (f_temp != NULL){
-		sprintf(info, "%s[%15s]\n", info, f_temp->name);
+		sprintf(info, "%s[%10s]\n", info, f_temp->name);
 		f_temp=f_temp->next;
 	}
 	return info;
@@ -168,9 +161,7 @@ char * avfilterinfo()
  */
 char * configurationinfo()
 {
-	char *info=(char *)malloc(40000);
-	memset(info,0,40000);
-
+	char info[10000] = { 0 };
 	av_register_all();
 
 	sprintf(info, "%s\n", avcodec_configuration());
@@ -180,26 +171,10 @@ char * configurationinfo()
 
 int main(int argc, char* argv[])
 {
-	char *infostr=NULL;
-	infostr=configurationinfo();
-	printf("\n<<Configuration>>\n%s",infostr);
-	free(infostr);
-
-	infostr=urlprotocolinfo();
-	printf("\n<<URLProtocol>>\n%s",infostr);
-	free(infostr);
-
-	infostr=avformatinfo();
-	printf("\n<<AVFormat>>\n%s",infostr);
-	free(infostr);
-
-	infostr=avcodecinfo();
-	printf("\n<<AVCodec>>\n%s",infostr);
-	free(infostr);
-
-	infostr=avfilterinfo();
-	printf("\n<<AVFilter>>\n%s",infostr);
-	free(infostr);
-
+	printf("\n<<Configuration>>\n%s",configurationinfo());
+	printf("\n<<URLProtocol>>\n%s",urlprotocolinfo());
+	printf("\n<<AVFormat>>\n%s",avformatinfo());
+	printf("\n<<AVCodec>>\n%s",avcodecinfo());
+	printf("\n<<AVFilter>>\n%s",avfilterinfo());
 	return 0;
 }
